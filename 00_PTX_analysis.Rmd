@@ -1,0 +1,1539 @@
+---
+title: "Pneumothorax in ISARIC dataset"
+date: "2nd March 2021"
+output:
+  html_document: 
+      toc: true
+      toc_depth: 3
+  pdf_document: default
+---
+
+
+```{r, include = FALSE}
+
+# Clear environment
+# rm(list=ls())
+
+# Run source
+# source("00_source_all.R")
+
+# Clear environment
+rm(list=ls())
+
+# Packages
+library(finalfit)
+library(knitr)
+library(lubridate)
+library(MatchIt)
+library(lavaan)
+library(lavaanPlot)
+library(dagitty)
+library(ggdag)
+library(tidyverse)
+
+## Functions 
+# Table defaults
+mykable = function(x, caption = "CAPTION", ...){
+  kable(x, row.names = FALSE, align = c("l", "l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"), 
+        booktabs = TRUE, caption = caption, 
+        linesep = c("", "", "\\addlinespace"), ...)
+}
+
+# Take sem results and draw to dag
+semToGraph = function (lavaan_result, dag_diagram){
+  
+  # Convert lavaan output into dagitty format
+  dag_result = lavaanToGraph(lavaan_result, digits = 2)
+  
+  # Transfer plot coordinates from diagram to results
+  coordinates(dag_result) = coordinates(dag_diagram)
+
+  # Extract variable names in original dag diagram
+  var_diagram = unlist(str_extract_all(dag_diagram, "\n\\w*")) %>% 
+    gsub("\n", "", .) %>% 
+    unique() 
+  var_diagram = var_diagram[var_diagram != ""]
+  
+  # Extract variable names in results
+  var_result = unlist(str_extract_all(dag_result, "\n\\w*")) %>% 
+    gsub("\n", "", .) %>% 
+    unique() 
+  var_result = var_result[var_result != ""]
+  
+  # Variables to delete from results
+  var_delete = var_result[!(var_result %in% var_diagram)]
+  
+  # Create new dag in diagram format
+  dag_new = dag_result
+  
+  # Delete all lines containing variables not in original dag diagram
+  if (length(var_delete) > 0){
+    for(i in 1:length(var_delete)){
+      dag_new = gsub(paste0("\n", var_delete[i],"[[:print:]]+"),"",dag_new)
+      dag_new = gsub(paste0("\n", var_delete[i]),"",dag_new)
+      dag_new = gsub(var_delete[i],"",dag_new)
+    }}
+
+  # corrupt lines of non-causal relationships so they won't be plotted
+  dag_new = gsub("<->", "", dag_new)
+  
+  # Output new dag from function
+  return(dag_new)
+}
+
+
+
+
+# Rmarkdown settings
+knitr::opts_chunk$set(echo=FALSE, message=FALSE)
+
+# Load file
+load("topline.RData")
+
+# Extract variable labels
+vlabels = topline %>% extract_variable_label()
+
+# Filter topline dataset
+ptx_data = topline %>% 
+  filter(hostdat >= "2020-01-06") %>%              # admitted after 6th Jan 2020
+  filter(hostdat < "2020-11-16")  %>%              # admitted before 16th Nov 2020
+  filter(!is.na(pneumothorax_ceterm)) %>%          # pneumothorax data available
+  filter(sex == "Male" | sex == "Female") %>%      # male or female sex
+  droplevels() %>% 
+  ff_relabel(vlabels)
+
+## Dates
+# Week of admission
+ptx_data = ptx_data %>% 
+  mutate(adm_week = floor_date(hostdat, unit="week", week_start = 1)) %>%         # week of admission
+  mutate(post.RECOVERY = if_else(hostdat > "2020-06-08", "Yes", "No") %>%         # admitted after RECOVERY anouncement
+           factor(levels = c("No", "Yes"))) %>% 
+  mutate(wave = if_else(hostdat < "2020-08-16", "1st", "2nd") %>%                  # admitted during 1st/2nd wave
+           factor(levels = c("1st", "2nd")))
+
+attr(ptx_data$adm_week, 'label') = "Week of admission"
+attr(ptx_data$post.RECOVERY, 'label') = "Post RECOVERY trial"
+attr(ptx_data$wave, 'label') = "COVID wave (15th August cut-off)"
+attr(ptx_data$any_icu, 'label') = "ICU/HDU admission"
+attr(ptx_data$age.factor, 'label') = "Age group"
+
+# Extract variable labels
+vlabels = ptx_data %>% extract_variable_label()
+
+## Caseload
+caseload = ptx_data %>% count(adm_week)
+ptx_data = ptx_data %>% 
+  mutate(caseload = caseload$n[match(ptx_data$adm_week, caseload$adm_week)])
+
+
+## Comorbidities
+# Smoker (smoking_mhyn)
+ptx_data = ptx_data %>% 
+  mutate(smoking_mhyn =  fct_recode(smoking_mhyn, Smoker = "Yes", NULL = "N/K") %>% 
+           fct_relevel("Never Smoked", "Former Smoker", "Smoker") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Obesity (obesity_mhyn)
+ptx_data = ptx_data %>% 
+  mutate(obesity_mhyn = fct_recode(obesity_mhyn, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>%  
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Chronic cardiac disease (chrincard)
+ptx_data = ptx_data %>% 
+  mutate(chrincard =  fct_recode(chrincard, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Hypertension (physician diagnosed) (hypertension_mhyn)
+ptx_data = ptx_data %>% 
+  mutate(hypertension_mhyn =  fct_recode(hypertension_mhyn, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Chronic kidney disease (renal_mhyn)
+ptx_data = ptx_data %>% 
+  mutate(renal_mhyn =  fct_recode(renal_mhyn, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Mild Liver disease (mildliver)
+ptx_data = ptx_data %>% 
+  mutate(mildliver =  fct_recode(mildliver, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Malignant neoplasm (malignantneo_mhyn)
+ptx_data = ptx_data %>% 
+  mutate(malignantneo_mhyn =  fct_recode(malignantneo_mhyn, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Diabetes_combined
+ptx_data = ptx_data %>% 
+    mutate(diabetes_combined = case_when(
+      diabetes_mhyn == "YES" | diabetescom_mhyn == "YES" ~ "Yes",
+      is.na(diabetes_mhyn) & is.na(diabetescom_mhyn) ~ NA_character_,
+      TRUE ~ "No") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels() %>% 
+      ff_label("Diabetes"))
+
+
+## Admission Signs And Symptoms
+# Respiratory Rate
+ptx_data = ptx_data %>% 
+  mutate(rr.factor = case_when(rr_vsorres < 20 ~ "<20",
+                                    rr_vsorres <30 ~ "20-29",
+                                    rr_vsorres >= 30 ~ ">=30",
+                                    TRUE ~ NA_character_) %>%
+           factor(levels = c("<20", "20-29", ">=30")) %>% 
+           ff_label("Respiratory rate"))
+
+# Temperature
+ptx_data = ptx_data %>% 
+  mutate(temp_vsorres = case_when(temp_vsorres < 0 ~ -temp_vsorres,  # Flip negative values
+                                  temp_vsorres > 50 ~ NA_real_,      # Remove values greater than 50
+                                  TRUE ~ temp_vsorres)) %>%          # Remaining keep the same
+  ff_relabel(vlabels)
+
+ptx_data = ptx_data %>%
+  mutate(temp.factor = case_when(temp_vsorres < 38 ~ "< 38",
+                                    temp_vsorres >= 38 ~ ">= 38",
+                                    TRUE ~ NA_character_) %>%
+           factor(levels = c("< 38", ">= 38")) %>% 
+           ff_label("Temperature"))
+  
+# Heart rate (beats per minute)
+ptx_data = ptx_data %>% 
+  mutate(hr_vsorres = case_when(hr_vsorres < 0 ~ -temp_vsorres,  # Flip negative values
+                                hr_vsorres > 500 ~ NA_real_,     # Remove values greater than 500
+                                  TRUE ~ hr_vsorres)) %>%        # Remaining keep the same
+  ff_relabel(vlabels)
+
+ptx_data = ptx_data %>%
+  mutate(hr.factor = case_when(hr_vsorres < 75 ~ "< 75",
+                               hr_vsorres <= 105  ~ "75 to 105",
+                               hr_vsorres > 105 ~ "> 105",
+                                  TRUE ~ NA_character_) %>% 
+           ff_label("Heart rate"))
+
+
+# Oxygen saturation (%)
+ptx_data = ptx_data %>% 
+  mutate(oxy_vsorres = case_when(oxy_vsorres < 0 ~ -oxy_vsorres,  # Flip negative values
+                                oxy_vsorres > 100 ~ NA_real_,     # Remove values greater than 100
+                                  TRUE ~ oxy_vsorres)) %>%        # Remaining keep the same
+  ff_relabel(vlabels)
+
+ptx_data = ptx_data %>%
+  mutate(oxy.factor = case_when(oxy_vsorres >= 92 ~ ">=92",
+                               oxy_vsorres < 92  ~ "<92",
+                                  TRUE ~ NA_character_) %>%
+           factor(levels = c(">=92", "<92")) %>% 
+           ff_label("Oxygen saturation"))
+
+
+# C-reactive protein (CRP) (daily_crp_lborres)
+ptx_data = ptx_data %>% 
+  mutate(daily_crp_lborres = case_when(daily_crp_lborres < 0 ~ -daily_crp_lborres,  # Flip negative values
+                                  TRUE ~ daily_crp_lborres)) %>%        # Remaining keep the same
+  ff_relabel(vlabels)
+
+ptx_data = ptx_data %>%
+  mutate(crp.factor = case_when(daily_crp_lborres < 50 ~ "<50",
+                               daily_crp_lborres < 100  ~ "50-99",
+                               daily_crp_lborres >= 100 ~ ">=100",
+                                  TRUE ~ NA_character_) %>%
+           factor(levels = c("<50", "50-99", ">=100")) %>% 
+           ff_label("C-reactive protein (CRP)"))
+
+# Glasgow comma scale (daily_gcs_vsorres)
+ptx_data = ptx_data %>% 
+  mutate(daily_gcs_vsorres = case_when(daily_gcs_vsorres < 0 ~ -daily_gcs_vsorres,  # Flip negative values
+                                       daily_gcs_vsorres > 15 ~ NA_real_,     # Remove values greater than 15
+                                  TRUE ~ daily_gcs_vsorres)) %>%        # Remaining keep the same
+  ff_relabel(vlabels)
+
+ptx_data = ptx_data %>%
+  mutate(gcs.factor = case_when(daily_gcs_vsorres == 15 ~ "15",
+                               daily_gcs_vsorres < 15  ~ "<15",
+                                  TRUE ~ NA_character_) %>%
+           factor(levels = c("15", "<15")) %>% 
+           ff_label("Glasgow Coma Score"))
+
+
+
+# Blood Urea Nitrogen (urea) (daily_bun_lborres)
+ptx_data = ptx_data %>% 
+  mutate(daily_bun_lborres = case_when(daily_bun_lborres < 0 ~ -daily_bun_lborres,  # Flip negative values
+                                  TRUE ~ daily_bun_lborres)) %>%        # Remaining keep the same
+  ff_relabel(vlabels)
+
+ptx_data = ptx_data %>%
+  mutate(bun.factor = case_when(daily_bun_lborres < 7 ~ "<7",
+                               daily_bun_lborres <= 14  ~ "7-14",
+                               daily_bun_lborres > 14  ~ ">14",
+                                  TRUE ~ NA_character_) %>%
+           factor(levels = c("<7", "7-14", ">14")) %>% 
+           ff_label("Blood Urea Nitrogen (urea)"))
+
+
+# Cough (cough_ceoccur_v2)
+ptx_data = ptx_data %>% 
+  mutate(cough_ceoccur_v2 = fct_recode(cough_ceoccur_v2, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Chest pain
+ptx_data = ptx_data %>% 
+  mutate(chestpain_ceoccur_v2 =  fct_recode(chestpain_ceoccur_v2, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+# Dyspnea
+ptx_data = ptx_data %>% 
+  mutate(shortbreath_ceoccur_v2 =  fct_recode(shortbreath_ceoccur_v2, Yes = "YES", No = "NO", NULL = "Unknown") %>% 
+           fct_relevel("No", "Yes") %>% 
+           droplevels()) %>% 
+  ff_relabel(vlabels)
+
+
+
+```
+
+# Incidence of pneumothorax
+
+## Weekly chart
+
+```{r}
+
+## Weekly chart showing number of pneumothrax cases and weekly incidence
+# scale factor of second axis
+coeff <- 1/60
+
+# Weekly chart of PTX
+ptx_data %>% 
+  group_by(adm_week, pneumothorax_ceterm, .drop = F) %>% 
+  tally() %>% 
+  mutate(weekly_total = sum(n),
+         ptx_percentage = n/weekly_total*100) %>% 
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  ggplot(aes(x = adm_week, y = n)) +
+  geom_col() +
+  geom_line( aes(x = adm_week, y = ptx_percentage/coeff),) +
+  scale_y_continuous(
+    name = "Pneumothorax (n)",
+    sec.axis = sec_axis(~.*coeff, name="Incidence (%)")
+  ) + 
+  labs(x ="Week of admission",
+       title = "Number of weekly pneumothrax cases and incidence") +
+  theme_bw()
+
+
+```
+
+
+## Patient characteristics, treatment and outcomes by pneumothorax
+
+```{r}
+# Pneumothorax Summary Table
+dependent = "pneumothorax_ceterm"
+explanatory = c("age",
+                "age.factor",
+                "sex",
+                "wave",
+                "rr.factor",
+                "oxy.factor",
+                "gcs.factor",
+                "bun.factor",
+                "crp.factor",
+                "chestpain_ceoccur_v2",
+                "shortbreath_ceoccur_v2",
+                "smoking_mhyn",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined",
+                "death",
+                "any_steroid",
+                "resp_support",
+                "any_icu",
+                "icu_days.factor"
+                )
+
+ptx_data %>%
+  summary_factorlist(dependent, explanatory,
+                     p = TRUE,                         # include hypothesis test
+                     cont  = "median",   # missing values row totals
+                     include_row_missing_col = FALSE,
+                     add_row_totals = TRUE,
+                     add_col_totals = TRUE,
+                     column = TRUE) %>%
+  mykable("")
+```
+
+
+## Risk factors for pneumothorax (all patients included)
+
+```{r}
+
+## Pneumothorax multivariate regression
+
+dependent = "pneumothorax_ceterm"
+explanatory = c("age.factor",
+                "sex",
+                "asthma_mhyn",
+                "chronicpul_mhyn"
+                )
+
+ptx_data %>%
+  summary_factorlist(dependent, explanatory, total_col = TRUE, fit_id=TRUE) %>%
+  ff_merge(
+    glmuni(ptx_data, dependent, explanatory) %>%
+    fit2df()) %>%
+  ff_remove_ref() %>%
+  dplyr::select(-`OR`) -> factorlist_plot
+
+ptx_data %>%
+   or_plot(dependent, explanatory, 
+                     breaks = c(0.5, 1, 2, 5, 10, 30),
+          table_text_size = 3.5,
+          title_text_size = 16,
+          factorlist = factorlist_plot)
+
+
+```
+
+## Risk factors for spontaneous pneumothorax (ward patients not on mechanical ventilation included)
+
+```{r}
+dependent = "pneumothorax_ceterm"
+explanatory = c("age.factor",
+                "sex",
+                "asthma_mhyn",
+                "chronicpul_mhyn"
+                )
+
+ptx_data %>%
+  filter(any_icu == "No", resp_support == "None" | resp_support == "Oxygen therapy") %>% 
+  summary_factorlist(dependent, explanatory, total_col = TRUE, fit_id=TRUE) %>%
+  ff_merge(
+    glmuni(ptx_data, dependent, explanatory) %>%
+    fit2df()) %>%
+  ff_remove_ref() %>%
+  dplyr::select(-`OR`) -> factorlist_plot
+
+ptx_data %>%
+   filter(any_icu == "No", resp_support == "None" | resp_support == "Oxygen therapy") %>% 
+   or_plot(dependent, explanatory, 
+                     breaks = c(0.5, 1, 2, 5, 10, 30),
+          table_text_size = 3.5,
+          title_text_size = 16,
+          factorlist = factorlist_plot)
+
+```
+
+## Risk factors for pneumothorax in ICU/HDU patients
+
+```{r}
+
+dependent = "pneumothorax_ceterm"
+explanatory = c("age.factor",
+                "sex",
+                "asthma_mhyn",
+                "chronicpul_mhyn"
+                )
+
+ptx_data %>%
+  filter(any_icu == "Yes") %>% 
+  summary_factorlist(dependent, explanatory, total_col = TRUE, fit_id=TRUE) %>%
+  ff_merge(
+    glmuni(ptx_data, dependent, explanatory) %>%
+    fit2df()) %>%
+  ff_remove_ref() %>%
+  dplyr::select(-`OR`) -> factorlist_plot
+
+ptx_data %>%
+  filter(any_icu == "Yes") %>% 
+   or_plot(dependent, explanatory, 
+                     breaks = c(0.5, 1, 2, 5, 10, 30),
+          table_text_size = 3.5,
+          title_text_size = 16,
+          factorlist = factorlist_plot)
+
+```
+
+## Pneumothorax stratified by respiratory support
+
+```{r}
+
+# Incidence of pneumothorax stratified by age group and respiratory support
+ptx_data %>% 
+  filter(!is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(resp_support)) %>% 
+  group_by(pneumothorax_ceterm, age.factor, resp_support, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, resp_support, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  ggplot(aes(x = resp_support, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  geom_text(position = position_dodge(width = 1), vjust = -0.25) + 
+  labs(x = "Respiratory support", 
+       y = "Incidence (%)", 
+       fill = "Age group",
+       title = "Incidence of pneumothorax stratified by age group and respiratory support",
+       subtitle = "Numbers show number of pneumothorax cases") +
+  theme_bw()
+
+dependent = "resp_support"
+explanatory = c("age",
+                "age.factor",
+                "sex",
+                "wave",
+                "rr.factor",
+                "oxy.factor",
+                "gcs.factor",
+                "bun.factor",
+                "crp.factor",
+                "chestpain_ceoccur_v2",
+                "shortbreath_ceoccur_v2",
+                "smoking_mhyn",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined",
+                "death",
+                "any_steroid",
+                #"resp_support",
+                "any_icu",
+                "icu_days.factor"
+                )
+
+ptx_data %>%
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  summary_factorlist(dependent, explanatory,
+                     p = TRUE,                         # include hypothesis test
+                     cont  = "median",   # missing values row totals
+                     include_row_missing_col = FALSE,
+                     add_row_totals = TRUE,
+                     add_col_totals = TRUE,
+                     column = TRUE) %>%
+  mykable("")
+
+
+```
+
+
+
+## Pneumothorax stratified by COVID-19 wave (15th August cut-off) 
+
+```{r}
+
+# Incidence of pneumothorax stratified by age group, respiratory support and covid wave
+ptx_data %>% 
+  filter(!is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(resp_support), !is.na(wave)) %>% 
+  group_by(pneumothorax_ceterm, age.factor, resp_support, wave, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, resp_support, wave, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  ggplot(aes(x = wave, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  facet_grid(.~ resp_support) +
+  geom_text(position = position_dodge(width = 1), vjust = -0.25, size = 3) + 
+  labs(x = "COVID-19 wave", 
+       y = "Incidence (%)", 
+       fill = "Age group",
+       title = "Incidence of pneumothorax stratified by age group, respiratory \nsupport and COVID-19 wave",
+       subtitle = "Numbers show number of pneumothorax cases") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1.1))
+
+
+dependent = "wave"
+explanatory = c("age",
+                "age.factor",
+                "sex",
+                #"wave",
+                "rr.factor",
+                "oxy.factor",
+                "gcs.factor",
+                "bun.factor",
+                "crp.factor",
+                "chestpain_ceoccur_v2",
+                "shortbreath_ceoccur_v2",
+                "smoking_mhyn",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined",
+                "death",
+                "any_steroid",
+                "resp_support",
+                "any_icu",
+                "icu_days.factor"
+                )
+
+ptx_data %>%
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  summary_factorlist(dependent, explanatory,
+                     p = TRUE,                         # include hypothesis test
+                     cont  = "median",   # missing values row totals
+                     include_row_missing_col = FALSE,
+                     add_row_totals = TRUE,
+                     add_col_totals = TRUE,
+                     column = TRUE) %>%
+  mykable("")
+
+
+```
+
+## Pneumothorax stratified by ICU/HDU admission and duration
+
+
+```{r}
+# Incidence of pneumothorax stratified by age group, respiratory support and ICU/HDU admission
+ptx_data %>% 
+  filter(!is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(resp_support), !is.na(any_icu)) %>% 
+  group_by(pneumothorax_ceterm, age.factor, resp_support, any_icu, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, resp_support, any_icu, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  ggplot(aes(x = any_icu, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  facet_grid(.~ resp_support) +
+  geom_text(position = position_dodge(width = 1), vjust = -0.25, size = 3) + 
+  labs(x = "ICU/HDU Admission", 
+       y = "Incidence (%)", 
+       fill = "Age group",
+       title = "Incidence of pneumothorax stratified by age group, respiratory \nsupport and ICU/HDU Admission",
+       subtitle = "Numbers show number of pneumothorax cases") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1.1))
+
+
+# Incidence of pneumothorax in ICU patients stratified by age group and respiratory support
+facet.label = c("Ward", "ICU/HDU")
+names(facet.label) = c("No", "Yes")
+
+ptx_data %>% 
+  filter(!is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(icu_days.factor)) %>% 
+  group_by(pneumothorax_ceterm, age.factor, icu_days.factor, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, icu_days.factor, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  ggplot(aes(x = icu_days.factor, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  #facet_grid(.~ any_icu,
+  #          labeller = labeller(any_icu = facet.label)) +
+  geom_text(position = position_dodge(width = 1), vjust = -0.25, size = 3) + 
+  labs(x = "Length of stay in ICU/HDU", 
+       y = "Incidence (%)", 
+       fill = "Age group",
+       title = "Incidence of pneumothorax stratified by age group and length of stay \nin ICU/HDU",
+       subtitle = "Numbers show number of pneumothorax cases") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1.1))
+```
+
+
+## Pneumothorax stratified by steroid treatment
+
+```{r}
+
+# Incidence of pneumothorax stratified by age group and respiratory support and steroid treatment
+facet.label = c("No Steroid Treatment", "Steroid Treatment")
+names(facet.label) = c("No", "Yes")
+
+ptx_data %>% 
+  filter(!is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(resp_support), !is.na(any_steroid)) %>% 
+  group_by(pneumothorax_ceterm, age.factor, resp_support, any_steroid, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, resp_support, any_steroid, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  ggplot(aes(x = resp_support, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  facet_grid(.~ any_steroid,
+                labeller = labeller(any_steroid = facet.label)) +
+  geom_text(position = position_dodge(width = 1), vjust = -0.25, size = 3) + 
+  labs(x = "Respiratory support", 
+       y = "Incidence (%)", 
+       fill = "Age group",
+       title = "Incidence of pneumothorax stratified by age group, respiratory \nsupport and steroid treatment",
+       subtitle = "Numbers show number of pneumothorax cases") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1.1))
+
+```
+
+
+
+# Mortality
+
+```{r}
+
+# Mortality stratified by age group, pneumothorax and ICU/HDU admission
+
+## Relabel any_icu facets
+any_icu.labs = c("Ward", "ICU/HDU")
+names(any_icu.labs) = c("No", "Yes")
+
+ptx_data %>% 
+  filter(!is.na(death), !is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(any_icu)) %>% 
+  group_by(death, age.factor, pneumothorax_ceterm, any_icu, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, pneumothorax_ceterm, any_icu, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(death == "Yes") %>% 
+  ggplot(aes(x = pneumothorax_ceterm, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  facet_grid(. ~ any_icu,
+             labeller = labeller(any_icu = any_icu.labs)) +
+  geom_text(position = position_dodge(width = 1), vjust = -0.25, size=3) + 
+  labs(x = "Pneumothorax", 
+       y = "Mortality (%)", 
+       fill = "Age group",
+       title = "Mortality stratified by age group, pneumothorax and \nICU/HDU admission",
+       subtitle = "Numbers show number of deaths") +
+  theme_bw()
+
+
+
+# Mortality stratified by age group, pneumothorax and respiratory support
+
+ptx_data %>% 
+  filter(!is.na(death), !is.na(pneumothorax_ceterm), !is.na(age.factor), !is.na(resp_support)) %>% 
+  group_by(death, age.factor, pneumothorax_ceterm, resp_support, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, pneumothorax_ceterm, resp_support, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(death == "Yes") %>% 
+  ggplot(aes(x = pneumothorax_ceterm, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  facet_grid(. ~ resp_support) +
+  #facet_wrap(~ resp_support, ncol=3) +
+  geom_text(position = position_dodge(width = 1), vjust = -0.25, size=3) + 
+  labs(x = "Pneumothorax", 
+       y = "Mortality (%)", 
+       fill = "Age group",
+       title = "Mortality stratified by age group, pneumothorax and \nrespiratory support",
+       subtitle = "Numbers show number of deaths") +
+  theme_bw()
+
+```
+
+## Mortality risk factors (All patients)
+
+```{r}
+dependent = "death"
+explanatory = c("pneumothorax_ceterm",
+                "age.factor",
+                "sex",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined"
+                )
+
+ptx_data %>%
+  summary_factorlist(dependent, explanatory, total_col = TRUE, fit_id=TRUE) %>%
+  ff_merge(
+    glmuni(ptx_data, dependent, explanatory) %>%
+    fit2df()) %>%
+  ff_remove_ref() %>%
+  dplyr::select(-`OR`) -> factorlist_plot
+
+ptx_data %>%
+   or_plot(dependent, explanatory, 
+                     breaks = c(0.5, 1, 2, 5, 10, 30),
+          table_text_size = 3.5,
+          title_text_size = 16,
+          factorlist = factorlist_plot)
+```
+
+
+## Mortality risk factors (ward patients not on mechanical ventilation)
+
+```{r}
+dependent = "death"
+explanatory = c("pneumothorax_ceterm",
+                "age.factor",
+                "sex",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined"
+                )
+
+ptx_data %>%
+  filter(any_icu == "No", resp_support == "None" | resp_support == "Oxygen therapy") %>% 
+  summary_factorlist(dependent, explanatory, total_col = TRUE, fit_id=TRUE) %>%
+  ff_merge(
+    glmuni(ptx_data, dependent, explanatory) %>%
+    fit2df()) %>%
+  ff_remove_ref() %>%
+  dplyr::select(-`OR`) -> factorlist_plot
+
+ptx_data %>%
+  filter(any_icu == "No", resp_support == "None" | resp_support == "Oxygen therapy") %>% 
+   or_plot(dependent, explanatory, 
+                     breaks = c(0.5, 1, 2, 5, 10, 30),
+          table_text_size = 3.5,
+          title_text_size = 16,
+          factorlist = factorlist_plot)
+
+
+```
+
+## Mortality risk factors (ICU/HDU patients)
+
+```{r}
+dependent = "death"
+explanatory = c("pneumothorax_ceterm",
+                "age.factor",
+                "sex",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined"
+                )
+
+ptx_data %>%
+   filter(any_icu == "Yes") %>% 
+  summary_factorlist(dependent, explanatory, total_col = TRUE, fit_id=TRUE) %>%
+  ff_merge(
+    glmuni(ptx_data, dependent, explanatory) %>%
+    fit2df()) %>%
+  ff_remove_ref() %>%
+  dplyr::select(-`OR`) -> factorlist_plot
+
+ptx_data %>%
+   filter(any_icu == "Yes") %>% 
+   or_plot(dependent, explanatory, 
+                     breaks = c(0.5, 1, 2, 5, 10),
+          table_text_size = 3.5,
+          title_text_size = 16,
+          factorlist = factorlist_plot)
+
+
+```
+
+
+
+## Mortality in patients with pneumothorax
+
+```{r}
+
+# Mortality in PTX stratified by age group and respiratory support
+ptx_data %>% 
+  filter(!is.na(death), pneumothorax_ceterm == "Yes", !is.na(age.factor), !is.na(resp_support)) %>% 
+  group_by(death, age.factor, resp_support, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, resp_support, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(death == "Yes") %>% 
+  ggplot(aes(x = resp_support, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  geom_text(position = position_dodge(width = 1), vjust = -0.25) + 
+  labs(x = "Respiratory support", 
+       y = "Mortality (%)", 
+       fill = "Age group",
+       title = "Mortality in pneumothorax stratified by age group and respiratory support",
+       subtitle = "Numbers show number of deaths") +
+  theme_bw()
+
+
+
+# Mortality in PTX stratified by age group and steroid treatment
+ptx_data %>% 
+  filter(!is.na(death), pneumothorax_ceterm == "Yes", !is.na(age.factor), !is.na(any_steroid)) %>% 
+  group_by(death, age.factor, any_steroid, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, any_steroid, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(death == "Yes") %>% 
+  ggplot(aes(x = any_steroid, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  geom_text(position = position_dodge(width = 1), vjust = -0.25) + 
+  labs(x = "Steroid treatment", 
+       y = "Mortality (%)", 
+       fill = "Age group",
+       title = "Mortality in pneumothorax stratified by age group and steroid treatment",
+       subtitle = "Numbers show number of deaths") +
+  theme_bw()
+
+
+
+# Mortality in PTX stratified by age group and ICU/HDU admission
+ptx_data %>% 
+  filter(!is.na(death), pneumothorax_ceterm == "Yes", !is.na(age.factor), !is.na(any_icu)) %>% 
+  group_by(death, age.factor, any_icu, .drop=FALSE) %>% 
+  tally() %>% 
+  group_by(age.factor, any_icu, .drop=FALSE) %>% 
+  mutate(n_group = sum(n),
+         prop = n/n_group) %>% 
+  filter(death == "Yes") %>% 
+  ggplot(aes(x = any_icu, y = prop*100, fill=age.factor, label = n)) +
+  geom_col(position = "dodge") + 
+  geom_text(position = position_dodge(width = 1), vjust = -0.25) + 
+  labs(x = "ICU/HDU Admission", 
+       y = "Mortality (%)", 
+       fill = "Age group",
+       title = "Mortality in pneumothorax stratified by age group and ICU/HDU admission",
+       subtitle = "Numbers show number of deaths") +
+  theme_bw()
+
+```
+
+## Pneumothorax patient characteristics, treatment stratified by death
+
+```{r}
+
+dependent = "death"
+explanatory = c("age",
+                "age.factor",
+                "sex",
+                "wave",
+                "rr.factor",
+                "oxy.factor",
+                "gcs.factor",
+                "bun.factor",
+                "crp.factor",
+                "chestpain_ceoccur_v2",
+                "shortbreath_ceoccur_v2",
+                "smoking_mhyn",
+                "asthma_mhyn",
+                "chronicpul_mhyn",
+                "obesity_mhyn",
+                "chrincard",
+                "hypertension_mhyn",
+                "renal_mhyn",
+                "mildliver",
+                "malignantneo_mhyn",
+                "diabetes_combined",
+                #"death",
+                "any_steroid",
+                "resp_support",
+                "any_icu",
+                "icu_days.factor"
+                )
+
+ptx_data %>%
+  filter(pneumothorax_ceterm == "Yes") %>% 
+  summary_factorlist(dependent, explanatory,
+                     p = TRUE,                         # include hypothesis test
+                     cont  = "median",   # missing values row totals
+                     include_row_missing_col = FALSE,
+                     add_row_totals = TRUE,
+                     add_col_totals = TRUE,
+                     column = TRUE) %>%
+  mykable("")
+
+```
+
+
+
+# Path Analysis
+
+
+
+```{r}
+
+# Prep for SEM
+
+ptx_simple = ptx_data %>%
+  select(
+    # Outcomes
+    pneumothorax_ceterm, death,
+    
+    # Risk factors
+    age.factor, sex,
+    
+    # Resp comorbidities
+    asthma_mhyn, chronicpul_mhyn,
+    
+    # Non-resp comorbidities
+    obesity_mhyn, chrincard, hypertension_mhyn, renal_mhyn, mildliver, malignantneo_mhyn, diabetes_combined,
+    
+    # Intervetions
+    any_invasive, any_noninvasive, any_steroid, any_icu,
+    
+    # Vitals
+    oxy.factor, rr.factor, gcs.factor, bun.factor, crp.factor,
+    
+    # Date
+    post.RECOVERY
+    ) %>% 
+  drop_na()
+
+
+# Recode factors into 0 (no) and 1 (yes)
+ptx_simple = ptx_simple %>% 
+  mutate(
+    
+    # Outcomes
+    death = factor(if_else(death == "No", 0, 1), ordered = F),
+    ptx = factor(if_else(pneumothorax_ceterm == "No", 0, 1), ordered = F),
+    
+    
+    # Risk factors
+    age70 = factor(case_when(age.factor == "<50" ~ 0,
+                                 age.factor == "50-69" ~ 0,
+                                 age.factor == "70-79" ~ 1,
+                                 age.factor == "80+" ~ 1), ordered = F),
+    male = factor(if_else(sex == "Female", 0, 1), ordered = F),
+    
+    # Comorbidities
+    asthma = factor(if_else(asthma_mhyn == "No", 0, 1), ordered = F),
+    chronicpul = factor(if_else(chronicpul_mhyn == "No", 0, 1), ordered = F),
+    obesity = factor(if_else(obesity_mhyn == "No", 0, 1), ordered = F),
+    chrincard = factor(if_else(chrincard == "No", 0, 1), ordered = F),
+    hypertension = factor(if_else(hypertension_mhyn == "No", 0, 1), ordered = F),
+    renal = factor(if_else(renal_mhyn == "No", 0, 1), ordered = F),
+    mildliver = factor(if_else(mildliver == "No", 0, 1), ordered = F),
+    malignantneo = factor(if_else(malignantneo_mhyn == "No", 0, 1), ordered = F),
+    diabetes = factor(if_else(diabetes_combined == "No", 0, 1), ordered = F),
+    
+    # Vitals
+    oxysat_low = factor(if_else(oxy.factor == "<92", 1, 0), ordered = F),
+    rr_high    = factor(if_else(rr.factor == ">=30", 1, 0), ordered = F),
+    gcs_low  = factor(if_else(gcs.factor == "<15", 1, 0), ordered = F),
+    urea_high = factor(if_else(bun.factor == ">14", 1, 0), ordered = F),
+    high_crp = factor(if_else(crp.factor == ">=100", 1, 0), ordered = F),
+    
+    # Intervetions
+    IMV   = factor(if_else(any_invasive == "Yes", 1, 0), ordered = F),
+    NIV   = factor(if_else(any_noninvasive == "Yes", 1, 0), ordered = F),
+    IMV_only = factor(if_else(any_invasive == "Yes" & any_noninvasive == "No", 1, 0), ordered = F),
+    NIV_only = factor(if_else(any_invasive == "No" & any_noninvasive == "Yes", 1, 0), ordered = F),
+    IMV_NIV = factor(if_else(any_invasive == "Yes" & any_noninvasive == "Yes", 1, 0), ordered = F),
+    steroid = factor(if_else(any_steroid == "No", 0, 1), ordered = F),
+    ICU = factor(if_else(any_icu == "No", 0, 1), ordered = F),
+    
+    # Date
+    postREC = factor(if_else(post.RECOVERY == "No", 0, 1), ordered = F),
+    )
+
+
+```
+
+
+## Description of data
+
+The data used in the analysis is taken from the ISARIC dataset of COVID-19 patients admitted to hospital after 6th Jan 2020 and before 16th Nov 2020 after filtering out incomplete observations. The dataset consists of 38,760 patients with 398 cases (1.0%) of pneumothorax.
+
+## Interpretation of lavaan's output  
+
+lavvan can only use a probit link rather than a logit link (as of Feb 2021). This means that odds ratios cannot be directly computed from the coefficients outputted from lavaan. However, an approximation of 'logit coefficient $\approx$ 1.6 $\times$ probit coefficient' can be used to obtained the following relationship (https://data.princeton.edu/wws509/r/c3s7):
+
+Odds Ratio = exp(logit coefficient) $\approx$ exp(1.6 $\times$ probit coefficient)
+
+For illustration, a simple model of 'death ~ ptx' is shown.
+
+lavaan's output is:
+
+```{r}
+
+model = "
+          death ~ ptx
+        "
+model = sem(model, data=ptx_simple, ordered=c("death"))
+summary(model)
+
+```
+
+From above, under 'Regressions:', the probit coeffient is 0.642. Compared with models using glm, the results are similar:
+
+```{r}
+
+glm_probit = glm(death ~ ptx, data = ptx_simple, family = binomial(link = "probit"))
+glm_logit = glm(death ~ ptx, data = ptx_simple, family = binomial(link = "logit"))
+
+```
+
+Coefficient from glm probit model is in agreement:
+
+```{r}
+glm_probit$coefficients[-1]
+```
+
+Coefficient from glm logit model:
+
+```{r}
+glm_logit$coefficients[-1]
+```
+
+Ratio of logit coefficient to probit coefficient:
+
+```{r}
+glm_logit$coefficients[-1]/glm_probit$coefficients[-1]
+```
+
+
+Estimated odds ratio using conversion factor of 1.6:
+```{r}
+exp(1.6*glm_probit$coefficients[-1])
+```
+
+Actual odds ratio:
+```{r}
+exp(glm_logit$coefficients[-1])
+```
+
+##  Path Models
+### Model 1A: Respiratory comorbidities
+
+
+```{r}
+
+
+dag_model =  dagitty("dag {
+                          age70 [pos=\"-2.513,2.152\"]
+                          asthma [pos=\"-2.454,-2.101\"]
+                          chronicpul [pos=\"-2.533,-3.562\"]
+                          death [outcome,pos=\"4.314,-0.838\"]
+                          ptx [exposure,pos=\"-8.766,-0.927\"]
+                          male [pos=\"-2.473,0.313\"]
+                          age70 -> death
+                          age70 -> ptx
+                          asthma -> death
+                          asthma -> ptx
+                          chronicpul -> death
+                          chronicpul -> ptx
+                          ptx -> death
+                          male -> death
+                          male -> ptx
+                          }")
+
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul
+          ptx ~ age70 + male + asthma + chronicpul
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+
+```
+
+### Model 1B: All comorbidities
+
+```{r}
+dag_model =  dagitty("dag {
+                          age70 [pos=\"-0.073,0.429\"]
+                          asthma [pos=\"-0.072,0.244\"]
+                          chrincard [pos=\"-0.065,-0.062\"]
+                          chronicpul [pos=\"-0.070,0.162\"]
+                          death [pos=\"0.428,0.100\"]
+                          diabetes [pos=\"-0.060,-0.475\"]
+                          hypertension [pos=\"-0.062,-0.138\"]
+                          male [pos=\"-0.072,0.343\"]
+                          malignantneo [pos=\"-0.063,-0.398\"]
+                          mildliver [pos=\"-0.060,-0.313\"]
+                          obesity [pos=\"-0.067,0.013\"]
+                          ptx [pos=\"-0.456,0.078\"]
+                          renal [pos=\"-0.061,-0.222\"]
+                          age70 -> death
+                          age70 -> ptx
+                          asthma -> death
+                          asthma -> ptx
+                          chrincard -> death
+                          chrincard -> ptx
+                          chronicpul -> death
+                          chronicpul -> ptx
+                          diabetes -> death
+                          diabetes -> ptx
+                          hypertension -> death
+                          hypertension -> ptx
+                          male -> death
+                          male -> ptx
+                          malignantneo -> death
+                          malignantneo -> ptx
+                          mildliver -> death
+                          mildliver -> ptx
+                          obesity -> death
+                          obesity -> ptx
+                          ptx -> death
+                          renal -> death
+                          renal -> ptx
+                          }")
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes 
+          ptx ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes 
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx", "NIV", "IMV", "steroid"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+
+```
+
+### Model 2: Vital signs
+
+Modifications: Add vital signs to model. 
+
+Note: Age, sex and comorbidities are removed from the DAG for simplicity but are still present in the model. See regression output.
+
+```{r}
+
+dag_model =  dagitty("dag {
+                          death [outcome,pos=\"0.926,0.920\"]
+                          gcs_low [pos=\"0.481,0.074\"]
+                          high_crp [pos=\"0.791,0.093\"]
+                          oxysat_low [pos=\"0.138,0.063\"]
+                          ptx [exposure,pos=\"0.227,0.911\"]
+                          rr_high [pos=\"0.313,0.073\"]
+                          urea_high [pos=\"0.630,0.084\"]
+                          gcs_low -> death
+                          gcs_low -> ptx
+                          high_crp -> death
+                          high_crp -> ptx
+                          oxysat_low -> death
+                          oxysat_low -> ptx
+                          ptx -> death
+                          rr_high -> death
+                          rr_high -> ptx
+                          urea_high -> death
+                          urea_high -> ptx
+                          }")
+
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes + oxysat_low + rr_high + gcs_low + urea_high + high_crp 
+          ptx ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes + oxysat_low + rr_high + gcs_low + urea_high + high_crp 
+          oxysat_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          rr_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          gcs_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          urea_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          high_crp ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx", "oxysat_low", "rr_high", "gcs_low", "urea_high", "high_crp"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+
+
+```
+
+
+
+### Model 3A: Respiratory support
+
+Modifications: Add NIV and IMV into model
+
+```{r}
+
+dag_model =  dagitty("dag {
+                          IMV [pos=\"0.554,0.663\"]
+                          NIV [pos=\"0.278,0.712\"]
+                          death [outcome,pos=\"0.926,0.920\"]
+                          gcs_low [pos=\"0.481,0.074\"]
+                          high_crp [pos=\"0.791,0.093\"]
+                          oxysat_low [pos=\"0.138,0.063\"]
+                          ptx [exposure,pos=\"0.227,0.911\"]
+                          rr_high [pos=\"0.313,0.073\"]
+                          urea_high [pos=\"0.630,0.084\"]
+                          IMV -> death
+                          IMV -> ptx
+                          NIV -> death
+                          NIV -> ptx
+                          gcs_low -> IMV
+                          gcs_low -> NIV
+                          gcs_low -> death
+                          high_crp -> IMV
+                          high_crp -> NIV
+                          high_crp -> death
+                          oxysat_low -> IMV
+                          oxysat_low -> NIV
+                          oxysat_low -> death
+                          ptx -> death
+                          rr_high -> IMV
+                          rr_high -> NIV
+                          rr_high -> death
+                          urea_high -> IMV
+                          urea_high -> NIV
+                          urea_high -> death
+                          }")
+
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes + oxysat_low + rr_high + gcs_low + urea_high + high_crp + IMV + NIV
+          ptx ~ IMV + NIV + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes 
+          IMV ~ oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          NIV ~ oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          oxysat_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          rr_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          gcs_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          urea_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          high_crp ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx", "NIV", "IMV", "oxysat_low", "rr_high", "gcs_low", "urea_high", "high_crp"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+
+
+```
+
+
+### Model 3B: Respiratory Support (NIV -> IMV)
+
+Modifications: Add path from NIV to IMV
+
+```{r}
+
+dag_model =  dagitty("dag {
+                          IMV [pos=\"0.554,0.663\"]
+                          NIV [pos=\"0.278,0.712\"]
+                          death [outcome,pos=\"0.926,0.920\"]
+                          gcs_low [pos=\"0.481,0.074\"]
+                          high_crp [pos=\"0.791,0.093\"]
+                          oxysat_low [pos=\"0.138,0.063\"]
+                          ptx [exposure,pos=\"0.227,0.911\"]
+                          rr_high [pos=\"0.313,0.073\"]
+                          urea_high [pos=\"0.630,0.084\"]
+                          IMV -> death
+                          IMV -> ptx
+                          NIV -> death
+                          NIV -> ptx
+                          NIV -> IMV
+                          gcs_low -> IMV
+                          gcs_low -> NIV
+                          gcs_low -> death
+                          high_crp -> IMV
+                          high_crp -> NIV
+                          high_crp -> death
+                          oxysat_low -> IMV
+                          oxysat_low -> NIV
+                          oxysat_low -> death
+                          ptx -> death
+                          rr_high -> IMV
+                          rr_high -> NIV
+                          rr_high -> death
+                          urea_high -> IMV
+                          urea_high -> NIV
+                          urea_high -> death
+                          }")
+
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes + oxysat_low + rr_high + gcs_low + urea_high + high_crp + IMV + NIV
+          ptx ~ IMV + NIV + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes 
+          IMV ~ NIV + oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          NIV ~ oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          oxysat_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          rr_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          gcs_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          urea_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          high_crp ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx", "NIV", "IMV", "oxysat_low", "rr_high", "gcs_low", "urea_high", "high_crp"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+
+
+```
+
+### Model 3C: Respiratory support (PTX -> IMV)
+
+Modification: Causal link from ptx to IMV
+
+```{r}
+
+dag_model =  dagitty("dag {
+                          IMV [pos=\"0.554,0.663\"]
+                          NIV [pos=\"0.278,0.712\"]
+                          death [outcome,pos=\"0.926,0.920\"]
+                          gcs_low [pos=\"0.481,0.074\"]
+                          high_crp [pos=\"0.791,0.093\"]
+                          oxysat_low [pos=\"0.138,0.063\"]
+                          ptx [exposure,pos=\"0.227,0.911\"]
+                          rr_high [pos=\"0.313,0.073\"]
+                          urea_high [pos=\"0.630,0.084\"]
+                          IMV -> death
+                          ptx -> IMV
+                          NIV -> death
+                          NIV -> ptx
+                          gcs_low -> IMV
+                          gcs_low -> NIV
+                          gcs_low -> death
+                          high_crp -> IMV
+                          high_crp -> NIV
+                          high_crp -> death
+                          oxysat_low -> IMV
+                          oxysat_low -> NIV
+                          oxysat_low -> death
+                          ptx -> death
+                          rr_high -> IMV
+                          rr_high -> NIV
+                          rr_high -> death
+                          urea_high -> IMV
+                          urea_high -> NIV
+                          urea_high -> death
+                          }")
+
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes + oxysat_low + rr_high + gcs_low + urea_high + high_crp + IMV + NIV
+          ptx ~ NIV + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes 
+          IMV ~ ptx + oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          NIV ~ oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          oxysat_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          rr_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          gcs_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          urea_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          high_crp ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx", "NIV", "IMV", "oxysat_low", "rr_high", "gcs_low", "urea_high", "high_crp"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+
+```
+
+
+
+### Model 4: Steroids
+
+Modification: Add steroids and effect of RECOVERY trial
+
+```{r}
+
+dag_model =  dagitty("dag {
+                        IMV [pos=\"0.554,0.663\"]
+                        NIV [pos=\"0.278,0.712\"]
+                        death [outcome,pos=\"0.926,0.920\"]
+                        gcs_low [pos=\"0.481,0.074\"]
+                        high_crp [pos=\"0.791,0.093\"]
+                        oxysat_low [pos=\"0.138,0.063\"]
+                        postREC [pos=\"0.069,0.771\"]
+                        ptx [exposure,pos=\"0.227,0.911\"]
+                        rr_high [pos=\"0.313,0.073\"]
+                        steroid [pos=\"0.074,0.549\"]
+                        urea_high [pos=\"0.630,0.084\"]
+                        IMV -> death
+                        IMV -> ptx
+                        NIV -> death
+                        NIV -> ptx
+                        gcs_low -> IMV
+                        gcs_low -> NIV
+                        gcs_low -> death
+                        gcs_low -> steroid
+                        high_crp -> IMV
+                        high_crp -> NIV
+                        high_crp -> death
+                        high_crp -> steroid
+                        oxysat_low -> IMV
+                        oxysat_low -> NIV
+                        oxysat_low -> death
+                        oxysat_low -> steroid
+                        postREC -> steroid
+                        ptx -> death
+                        rr_high -> IMV
+                        rr_high -> NIV
+                        rr_high -> death
+                        rr_high -> steroid
+                        steroid -> ptx
+                        urea_high -> IMV
+                        urea_high -> NIV
+                        urea_high -> death
+                        urea_high -> steroid
+                        }")
+
+model = "
+          death ~ ptx + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes + oxysat_low + rr_high + gcs_low + urea_high + high_crp + IMV + NIV + steroid
+          ptx ~ IMV + NIV + steroid + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes 
+          IMV ~ oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          NIV ~ oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          steroid ~ postREC + oxysat_low + rr_high + gcs_low + urea_high + high_crp + age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          oxysat_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          rr_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          gcs_low ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          urea_high ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+          high_crp ~ age70 + male + asthma + chronicpul + obesity + chrincard + hypertension + renal + mildliver + malignantneo + diabetes
+        "
+model = sem(model, data=ptx_simple, ordered=c("death", "ptx", "NIV", "IMV", "steroid", "oxysat_low", "rr_high", "gcs_low", "urea_high", "high_crp"))
+summary(model)
+
+# Format to original dag and plot
+semToGraph(model, dag_model) %>% 
+  plot(show.coefficients = T)
+
+```
+
+
+
+
+
+
+
+
+
+
